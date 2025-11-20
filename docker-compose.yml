@@ -17,7 +17,6 @@ services:
       retries: 30
       start_period: 30s
 
-
   aiohttp_app:
     container_name: aiohttp_app
     build: .
@@ -29,6 +28,9 @@ services:
     environment:
       CLICKHOUSE_HOST: clickhouse
       CLICKHOUSE_PORT: 8123
+    volumes:
+      - ./src:/app/src
 
+# Объявляем volume
 volumes:
   clickhouse-data:
