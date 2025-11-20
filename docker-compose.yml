@@ -1,0 +1,11 @@
+version: "3.9"
+
+services:
+  aiohttp_app:
+    build: .
+    container_name: aiohttp_app
+    ports:
+      - "8080:8080"
+    restart: always
+    environment:
+      - PYTHONUNBUFFERED=1

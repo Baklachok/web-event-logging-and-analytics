@@ -1,0 +1,12 @@
+components:
+  schemas:
+    Item:
+      type: object
+      properties:
+        name:
+          type: string
+        price:
+          type: number
+      required:
+        - name
+        - price
