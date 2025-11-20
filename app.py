@@ -1,74 +1,67 @@
+from datetime import datetime
+from typing import Dict
+
 from aiohttp import web
-from aiohttp_swagger3 import SwaggerDocs, SwaggerInfo, SwaggerUiSettings
+from aiohttp_swagger3 import SwaggerDocs, SwaggerUiSettings, SwaggerInfo
 from pydantic import BaseModel
+from clickhouse_connect.driver import create_client
+
+from src.api.handlers import add_event, get_events
 
 
-# Pydantic модель, используем её для валидации в коде
-class Item(BaseModel):
-    name: str
-    price: float
+# -----------------------------
+# МОДЕЛИ
+# -----------------------------
+class Event(BaseModel):
+    user_id: int
+    event_type: str
+    page: str
+    timestamp: datetime
 
 
-items: list[Item] = []
+# -----------------------------
+# УТИЛИТЫ
+# -----------------------------
+def serialize_event(event: Dict) -> Dict:
+    """Преобразует datetime в ISO строку для JSON"""
+    return {
+        k: (v.isoformat() if isinstance(v, datetime) else v) for k, v in event.items()
+    }
 
+
+# -----------------------------
+# ClickHouse клиент
+# -----------------------------
+ch_client = create_client(
+    host="clickhouse",
+    port=8123,
+    username="default",
+    password="",
+    database="default",
+)
+
+
+# -----------------------------
+# Инициализация приложения
+# -----------------------------
 app = web.Application()
 
 swagger = SwaggerDocs(
     app,
     swagger_ui_settings=SwaggerUiSettings(path="/docs"),
     info=SwaggerInfo(
-        title="My API", version="1.0.0", description="Пример API с Pydantic и Swagger"
+        title="Events API", version="1.0.0", description="API для работы с событиями"
     ),
-    components="components.yaml",  # подключаем файл с описанием схем
 )
 
-
-async def get_items(request: web.Request) -> web.Response:
-    """
-    Возвращает список товаров.
-    ---
-    summary: Получить все товары
-    responses:
-      '200':
-        description: Список всех товаров
-        content:
-          application/json:
-            schema:
-              type: array
-              items:
-                $ref: "#/components/schemas/Item"
-    """
-    # Возвращаем список Pydantic моделей, swagger будет валидировать JSON
-    return web.json_response([item.dict() for item in items])
+# -----------------------------
+# РОУТИНГ
+# -----------------------------
+swagger.add_routes([web.post("/events", add_event), web.get("/events", get_events)])
 
 
-async def add_item(request: web.Request) -> web.Response:
-    """
-    Создает новый товар.
-    ---
-    summary: Добавить товар
-    requestBody:
-      required: true
-      content:
-        application/json:
-          schema:
-            $ref: "#/components/schemas/Item"
-    responses:
-      '201':
-        description: Товар создан
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/Item"
-    """
-    data = await request.json()
-    item = Item(**data)  # валидация pydantic
-    items.append(item)
-    return web.json_response(item.dict(), status=201)
-
-
-# Регистрируем маршруты
-swagger.add_routes([web.get("/items", get_items), web.post("/items", add_item)])
-
+# -----------------------------
+# RUN
+# -----------------------------
 if __name__ == "__main__":
     web.run_app(app, host="0.0.0.0", port=8080)
