@@ -1,7 +1,8 @@
+from typing import Any
+
 from aiohttp import web
 
-from src.api.schemas import Event
-from src.db.clickhouse import ch_client
+from src.db.types import ClickHouseClientProtocol
 from src.utils.clickhouse_utils import rows_to_dicts, build_filters
 
 
@@ -29,16 +30,12 @@ async def add_event(request: web.Request) -> web.Response:
       '201':
         description: Событие добавлено
     """
-    data = await request.json()
-    event = Event(**data)
+    data: dict[str, Any] = await request.json()
 
-    ch_client.insert(
-        table="events",
-        data=[[event.user_id, event.event_type, event.page, event.timestamp]],
-        column_names=["user_id", "event_type", "page", "timestamp"],
-    )
+    queue = request.app["event_queue"]
+    await queue.put(data)
 
-    return web.json_response({"status": "ok"}, status=201)
+    return web.json_response({"status": "queued"}, status=201)
 
 
 async def get_events(request: web.Request) -> web.Response:
@@ -65,7 +62,9 @@ async def get_events(request: web.Request) -> web.Response:
                     type: string
                     format: date-time
     """
-    result = ch_client.query("SELECT * FROM events")
+    client: ClickHouseClientProtocol = request.app["clickhouse"]
+    result = client.query("SELECT * FROM events")
+
     events = rows_to_dicts(result.result_rows, result.column_names)
     return web.json_response(events)
 
@@ -106,7 +105,11 @@ async def get_stats(request: web.Request) -> web.Response:
     date_from = request.query.get("date_from")
     date_to = request.query.get("date_to")
 
-    where_clause = build_filters(event_type, date_from, date_to)
+    where_clause = build_filters(
+        event_type=event_type,
+        date_from=date_from,
+        date_to=date_to,
+    )
 
     query = f"""
         SELECT event_type, COUNT(*) AS count
@@ -115,6 +118,9 @@ async def get_stats(request: web.Request) -> web.Response:
         GROUP BY event_type
         ORDER BY count DESC
     """
-    result = ch_client.query(query)
-    stats = {row[0]: row[1] for row in result.result_rows}
+
+    client: ClickHouseClientProtocol = request.app["clickhouse"]
+    result = client.query(query)
+
+    stats = {row[1]: row[0] for row in result.result_rows}
     return web.json_response(stats)
