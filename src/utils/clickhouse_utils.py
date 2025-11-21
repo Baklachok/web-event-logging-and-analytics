@@ -1,5 +1,6 @@
 from typing import Optional, Dict, List, Sequence
 
+from src.api.schemas import Event
 from src.utils.encoders import serialize_event
 
 
@@ -30,3 +31,10 @@ def rows_to_dicts(rows: Sequence[Sequence], columns: Sequence[str]) -> List[Dict
     """
 
     return [serialize_event(dict(zip(columns, row))) for row in rows]
+
+
+def prepare_clickhouse_rows(batch: List[Event]) -> list[tuple]:
+    """
+    Преобразует список Event в формат для ClickHouse.
+    """
+    return [(e.user_id, e.event_type, e.page, e.timestamp) for e in batch]

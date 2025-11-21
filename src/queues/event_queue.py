@@ -1,61 +1,70 @@
 import asyncio
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
-from src.api.schemas import Event  # Pydantic-модель
+from src.api.schemas import Event
+from src.utils.clickhouse_utils import prepare_clickhouse_rows
+from src.utils.event_helpers import validate_events
 
 
 class EventQueue:
-    def __init__(self, batch_size: int, batch_interval: float):
-        self.queue: asyncio.Queue[Event] = asyncio.Queue()
-        self.batch_size = batch_size
-        self.batch_interval = batch_interval
-        self._task: asyncio.Task | None = None
-        self.app = None  # сюда подставляется aiohttp app
+    """
+    Асинхронная очередь для событий с поддержкой батчинга
+    и фоновой отправки в ClickHouse.
+    """
 
-    def bind_app(self, app):
-        """Позволяет очереди работать через app['clickhouse']"""
+    def __init__(self, batch_size: int, batch_interval: float) -> None:
+        self.queue: asyncio.Queue[List[Event]] = asyncio.Queue()
+        self.batch_size: int = batch_size
+        self.batch_interval: float = batch_interval
+        self._worker_task: Optional[asyncio.Task] = None
+        self.app: Optional[Any] = None  # aiohttp app с client['clickhouse']
+
+    def bind_app(self, app: Any) -> None:
+        """Привязывает aiohttp app для использования ClickHouse клиента."""
         self.app = app
 
-    async def put(self, event: Dict[str, Any]):
+    async def put(self, events: List[Dict[str, Any]]) -> None:
         """
-        Добавление события в очередь.
-        Здесь валидируем timestamp и делаем datetime вместо строки.
+        Добавление событий в очередь.
+        Валидирует каждое событие через Pydantic Event.
         """
-        validated = Event(**event)  # timestamp превращается в datetime
-        await self.queue.put(validated)
+        validated_events = validate_events(events)
+        await self.queue.put(validated_events)
 
-    async def start(self):
-        if not self._task:
-            self._task = asyncio.create_task(self._worker())
+    async def start(self) -> None:
+        """Запускает фоновый воркер очереди."""
+        if not self._worker_task:
+            self._worker_task = asyncio.create_task(self._worker())
 
-    async def stop(self):
-        if self._task:
-            self._task.cancel()
+    async def stop(self) -> None:
+        """Останавливает фонового воркера."""
+        if self._worker_task:
+            self._worker_task.cancel()
             try:
-                await self._task
+                await self._worker_task
             except asyncio.CancelledError:
                 pass
 
+    # ================= Internal Worker =================
+
     async def _worker(self) -> None:
-        print("Worker started!")
+        """Фоновый воркер, который собирает события в батчи и отправляет их."""
+        print("EventQueue worker started!")
         batch: List[Event] = []
 
         while True:
             try:
                 try:
-                    # Ждём событие batch_interval секунд
-                    item = await asyncio.wait_for(
+                    item: List[Event] = await asyncio.wait_for(
                         self.queue.get(), timeout=self.batch_interval
                     )
-                    batch.append(item)
+                    batch.extend(item)
 
-                    # если батч заполнен — отправляем
-                    if len(batch) >= self.batch_size:
-                        await self._flush(batch)
-                        batch.clear()
+                    while len(batch) >= self.batch_size:
+                        await self._flush(batch[: self.batch_size])
+                        batch = batch[self.batch_size :]
 
                 except asyncio.TimeoutError:
-                    # если истёк таймаут — отправляем накопленное
                     if batch:
                         await self._flush(batch)
                         batch.clear()
@@ -64,9 +73,10 @@ class EventQueue:
                 print("QUEUE ERROR:", e)
                 await asyncio.sleep(1)
 
-    async def _flush(self, batch: List[Event]) -> None:
-        print("Flush starting", batch)
+    # ================= Flush =================
 
+    async def _flush(self, batch: List[Event]) -> None:
+        """Отправка батча в ClickHouse."""
         if not batch:
             return
 
@@ -74,16 +84,7 @@ class EventQueue:
             raise RuntimeError("EventQueue.app is not bound. Call bind_app(app) first.")
 
         client = self.app["clickhouse"]
-
-        rows = [
-            (
-                ev.user_id,
-                ev.event_type,
-                ev.page,
-                ev.timestamp,
-            )
-            for ev in batch
-        ]
+        rows = prepare_clickhouse_rows(batch)
 
         client.insert(
             "events", rows, column_names=["user_id", "event_type", "page", "timestamp"]
