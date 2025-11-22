@@ -5,19 +5,25 @@ from src.api.handlers import add_event, get_events, get_stats
 from src.config import HOST, PORT, BATCH_SIZE, BATCH_INTERVAL
 from src.db.clickhouse import ch_client
 from src.queues.event_queue import EventQueue
+from src.rabbit.settings import setup_rabbit, cleanup_rabbit
 
 
 # -----------------------------
-# Инициализация приложения
+# Инициализация очереди событий
 # -----------------------------
-def create_app() -> web.Application:
-    app = web.Application()
+def setup_event_queue(app: web.Application) -> None:
+    queue = EventQueue(batch_size=BATCH_SIZE, batch_interval=BATCH_INTERVAL)
+    queue.bind_app(app)
+    app["event_queue"] = queue
+    app.on_startup.append(lambda app: queue.start())
+    app.on_cleanup.append(lambda app: queue.stop())
 
-    # Подключаем ClickHouse клиент
-    app["clickhouse"] = ch_client
 
-    # Инициализация Swagger
-    SwaggerDocs(
+# -----------------------------
+# Регистрация Swagger и роутов
+# -----------------------------
+def setup_swagger(app: web.Application) -> SwaggerDocs:
+    docs = SwaggerDocs(
         app,
         swagger_ui_settings=SwaggerUiSettings(path="/docs"),
         info=SwaggerInfo(
@@ -27,22 +33,30 @@ def create_app() -> web.Application:
         ),
     )
 
-    # Инициализация очереди событий
-    event_queue = EventQueue(batch_size=BATCH_SIZE, batch_interval=BATCH_INTERVAL)
-    event_queue.bind_app(app)
-    app["event_queue"] = event_queue
+    docs.add_routes(
+        [
+            web.post("/events", add_event),
+            web.get("/events", get_events),
+            web.get("/stats", get_stats),
+        ]
+    )
+    return docs
 
-    # Регистрация фоновых задач
-    app.on_startup.append(lambda app: event_queue.start())
-    app.on_cleanup.append(lambda app: event_queue.stop())
 
-    # Роутинг
-    swagger_routes = [
-        web.post("/events", add_event),
-        web.get("/events", get_events),
-        web.get("/stats", get_stats),
-    ]
-    app.router.add_routes(swagger_routes)
+# -----------------------------
+# Создание aiohttp приложения
+# -----------------------------
+def create_app() -> web.Application:
+    app = web.Application()
+
+    # Подключаем ClickHouse клиент
+    app["clickhouse"] = ch_client
+
+    # Инициализация сервисов
+    setup_event_queue(app)
+    setup_swagger(app)
+    app.on_startup.append(setup_rabbit)
+    app.on_cleanup.append(cleanup_rabbit)
 
     return app
 

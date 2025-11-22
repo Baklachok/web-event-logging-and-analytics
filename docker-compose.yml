@@ -17,20 +17,38 @@ services:
       retries: 30
       start_period: 30s
 
+  rabbitmq:
+    image: rabbitmq:3.12-management
+    container_name: rabbitmq
+    ports:
+      - "5672:5672"     # AMQP
+      - "15672:15672"   # Web UI
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    healthcheck:
+      test: ["CMD-SHELL", "rabbitmq-diagnostics -q ping"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+      start_period: 20s
+
   aiohttp_app:
     container_name: aiohttp_app
     build: .
     depends_on:
       clickhouse:
         condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
     ports:
       - "8080:8080"
     environment:
       CLICKHOUSE_HOST: clickhouse
       CLICKHOUSE_PORT: 8123
+      RABBIT_URL: amqp://guest:guest@rabbitmq:5672/
     volumes:
       - ./src:/app/src
 
-# Объявляем volume
 volumes:
   clickhouse-data:
