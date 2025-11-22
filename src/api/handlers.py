@@ -1,14 +1,13 @@
-import logging
 from typing import Any
 
 from aiohttp import web
 
 from src.db.types import ClickHouseClientProtocol
 from src.utils.clickhouse_utils import rows_to_dicts, build_filters
+from src.utils.logging import get_logger
 
 # Настройка логирования
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
+logger = get_logger(__name__)
 
 
 async def add_event(request: web.Request) -> web.Response:

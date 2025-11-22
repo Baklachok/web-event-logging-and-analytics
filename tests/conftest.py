@@ -41,3 +41,22 @@ def app(
     application["clickhouse"] = cli_ch_client
     application["rabbit"] = cli_rabbit
     return application
+
+
+@pytest.fixture
+def mock_request(app: web.Application):
+    """
+    Возвращает функцию для быстрого создания мок-запроса.
+
+    Usage:
+        request = mock_request(json_payload={"key": "value"}, query_params={"param": "1"})
+    """
+
+    def _make(json_payload=None, query_params=None):
+        request = AsyncMock()
+        request.app = app
+        request.json = AsyncMock(return_value=json_payload or {})
+        request.query = query_params or {}
+        return request
+
+    return _make

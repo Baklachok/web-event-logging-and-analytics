@@ -1,68 +1,73 @@
 from aiohttp import web
-from aiohttp_swagger3 import SwaggerDocs, SwaggerUiSettings, SwaggerInfo
 
-from src.api.handlers import add_event, get_events, get_stats
 from src.config import HOST, PORT, BATCH_SIZE, BATCH_INTERVAL
 from src.db.clickhouse import ch_client
+from src.metrics.metrics import Metrics
 from src.queues.event_queue import EventQueue
-from src.rabbit.settings import setup_rabbit, cleanup_rabbit
+from src.rabbit.settings import setup_rabbit, cleanup_rabbit, graceful_shutdown
+from src.swagger.settings import setup_swagger
+from src.utils.logging import setup_logging
 
 
-# -----------------------------
-# Инициализация очереди событий
-# -----------------------------
-def setup_event_queue(app: web.Application) -> None:
+# -----------------------------------------------------------
+# Event Queue
+# -----------------------------------------------------------
+async def event_queue_ctx(app: web.Application):
+    """
+    Контекст менеджер для EventQueue.
+    Автоматически запускает и останавливает очередь.
+    """
     queue = EventQueue(batch_size=BATCH_SIZE, batch_interval=BATCH_INTERVAL)
     queue.bind_app(app)
+
     app["event_queue"] = queue
-    app.on_startup.append(lambda app: queue.start())
-    app.on_cleanup.append(lambda app: queue.stop())
+    await queue.start()
+    yield
+    await queue.stop()
 
 
-# -----------------------------
-# Регистрация Swagger и роутов
-# -----------------------------
-def setup_swagger(app: web.Application) -> SwaggerDocs:
-    docs = SwaggerDocs(
-        app,
-        swagger_ui_settings=SwaggerUiSettings(path="/docs"),
-        info=SwaggerInfo(
-            title="Events API",
-            version="1.0.0",
-            description="API для работы с событиями",
-        ),
-    )
-
-    docs.add_routes(
-        [
-            web.post("/events", add_event),
-            web.get("/events", get_events),
-            web.get("/stats", get_stats),
-        ]
-    )
-    return docs
+# -----------------------------------------------------------
+# RabbitMQ
+# -----------------------------------------------------------
+async def rabbit_ctx(app: web.Application):
+    """
+    Контекстный менеджер для RabbitMQ.
+    Гарантирует корректный запуск и закрытие соединения.
+    """
+    await setup_rabbit(app)
+    yield
+    await cleanup_rabbit(app)
 
 
-# -----------------------------
-# Создание aiohttp приложения
-# -----------------------------
+# -----------------------------------------------------------
+# Основной конструктор приложения
+# -----------------------------------------------------------
 def create_app() -> web.Application:
+    """Создаёт и полностью инициализирует aiohttp приложение."""
+    setup_logging()
     app = web.Application()
 
-    # Подключаем ClickHouse клиент
+    # ClickHouse client
     app["clickhouse"] = ch_client
 
-    # Инициализация сервисов
-    setup_event_queue(app)
+    # Metrics
+    app["metrics"] = Metrics()
+
+    # Контекстные менеджеры сервисов
+    app.cleanup_ctx.append(event_queue_ctx)
+    app.cleanup_ctx.append(rabbit_ctx)
+
+    # Swagger и маршруты
     setup_swagger(app)
-    app.on_startup.append(setup_rabbit)
-    app.on_cleanup.append(cleanup_rabbit)
+
+    # Graceful shutdown
+    app.on_shutdown.append(graceful_shutdown)
 
     return app
 
 
-# -----------------------------
+# -----------------------------------------------------------
 # Entry point
-# -----------------------------
+# -----------------------------------------------------------
 if __name__ == "__main__":
     web.run_app(create_app(), host=HOST, port=PORT)
