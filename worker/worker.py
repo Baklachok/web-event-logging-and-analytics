@@ -1,45 +1,71 @@
 import asyncio
+import os
 from datetime import datetime
 import json
+import logging
 
 import aio_pika
 from clickhouse_driver import Client  # type: ignore
 
-from worker_config import CLICKHOUSE_HOST, RABBIT_URL  # type: ignore
+CLICKHOUSE_HOST = os.getenv("CLICKHOUSE_HOST", "localhost")
+CLICKHOUSE_PORT = int(os.getenv("CLICKHOUSE_PORT", "8123"))
+RABBIT_URL = os.getenv("RABBIT_URL", "amqp://guest:guest@rabbitmq:5672/")
+
+# Настройка логгера
+logger = logging.getLogger("worker")
+logger.setLevel(logging.INFO)
+handler = logging.StreamHandler()
+formatter = logging.Formatter("[%(asctime)s] [%(levelname)s] %(name)s: %(message)s")
+handler.setFormatter(formatter)
+logger.addHandler(handler)
 
 client = Client(host=CLICKHOUSE_HOST)
 
 
 async def process_message(message: aio_pika.IncomingMessage):
-    body = json.loads(message.body.decode())
+    try:
+        body = json.loads(message.body.decode())
 
-    user_id = body["user_id"]
-    event_type = body["event_type"]
-    page = body["page"]
-    timestamp = datetime.fromisoformat(body["timestamp"])
+        user_id = body["user_id"]
+        event_type = body["event_type"]
+        page = body["page"]
+        timestamp = datetime.fromisoformat(body["timestamp"])
 
-    client.execute(
-        """
-        INSERT INTO events (user_id, event_type, page, timestamp)
-        VALUES
-        """,
-        [(user_id, event_type, page, timestamp)],
-    )
-    print("Inserted:", body)
+        client.execute(
+            """
+            INSERT INTO events (user_id, event_type, page, timestamp)
+            VALUES
+            """,
+            [(user_id, event_type, page, timestamp)],
+        )
+        logger.info("Inserted event into ClickHouse: %s", body)
+    except Exception as e:
+        logger.error("Failed to process message: %s; error: %s", message.body, e)
+        raise
 
 
 async def connect_with_retry(url, retries=10, base_delay=2):
     attempt = 0
     while True:
         try:
-            return await aio_pika.connect_robust(url)
+            logger.info("Connecting to RabbitMQ at %s...", url)
+            connection = await aio_pika.connect_robust(url)
+            logger.info("Connected to RabbitMQ")
+            return connection
         except Exception as e:
             attempt += 1
             delay = base_delay * (2 ** (attempt - 1))
             delay = min(delay, 30)  # ограничение максимального backoff
-            print(f"RabbitMQ not ready ({e}), retrying in {delay}s...")
+            logger.warning(
+                "RabbitMQ not ready (attempt %d/%d: %s), retrying in %ds...",
+                attempt,
+                retries,
+                e,
+                delay,
+            )
             await asyncio.sleep(delay)
             if retries and attempt >= retries:
+                logger.error("Exceeded maximum retry attempts (%d).", retries)
                 raise
 
 
@@ -51,6 +77,7 @@ async def main():
         "events_queue",
         durable=True,
     )
+    logger.info("Subscribed to queue: %s", queue)
 
     async with queue.iterator() as queue_iter:
         async for message in queue_iter:
@@ -58,7 +85,7 @@ async def main():
                 async with message.process(requeue=True):
                     await process_message(message)
             except Exception as e:
-                print("Error:", e)
+                logger.error("Error processing message: %s", e)
 
 
 if __name__ == "__main__":
