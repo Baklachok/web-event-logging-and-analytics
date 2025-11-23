@@ -48,7 +48,23 @@ services:
       CLICKHOUSE_PORT: 8123
       RABBIT_URL: amqp://guest:guest@rabbitmq:5672/
     volumes:
-      - ./src:/app/src
+      - .:/app
+
+  worker:
+    container_name: worker
+    build: .
+    command: [ "python", "worker/worker.py" ]
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: 8123
+      RABBIT_URL: amqp://guest:guest@rabbitmq:5672/
+    volumes:
+      - .:/app
 
 volumes:
   clickhouse-data:

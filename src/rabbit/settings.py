@@ -1,4 +1,3 @@
-
 from aiohttp import web
 
 from src.config import RABBIT_URL
