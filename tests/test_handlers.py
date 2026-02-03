@@ -78,14 +78,13 @@ async def test_get_events_empty(app, mock_request):
 async def test_get_stats(app, mock_request):
     request = mock_request(query_params={"event_type": "click"})
 
-    import src.utils.clickhouse_utils as utils
+    app["clickhouse"].query.return_value = AsyncMock(
+        result_rows=[("click", 1)],
+        column_names=["event_type", "count"],
+    )
 
-    original_build_filters = utils.build_filters
-    utils.build_filters = lambda **kwargs: "WHERE event_type='click'"
-
-    try:
-        response = await handlers.get_stats(request)
-        app["clickhouse"].query.assert_called_once()
-        assert json.loads(response.text or "{}") == {"click": 1}
-    finally:
-        utils.build_filters = original_build_filters
+    response = await handlers.get_stats(request)
+    app["clickhouse"].query.assert_called_once()
+    _, kwargs = app["clickhouse"].query.call_args
+    assert kwargs["parameters"]["event_type"] == "click"
+    assert json.loads(response.text or "{}") == {"click": 1}

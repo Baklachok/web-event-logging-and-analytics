@@ -8,7 +8,7 @@ import aio_pika
 from clickhouse_driver import Client  # type: ignore
 
 CLICKHOUSE_HOST = os.getenv("CLICKHOUSE_HOST", "localhost")
-CLICKHOUSE_PORT = int(os.getenv("CLICKHOUSE_PORT", "8123"))
+CLICKHOUSE_NATIVE_PORT = int(os.getenv("CLICKHOUSE_NATIVE_PORT", "9000"))
 RABBIT_URL = os.getenv("RABBIT_URL", "amqp://guest:guest@rabbitmq:5672/")
 
 # Настройка логгера
@@ -19,7 +19,7 @@ formatter = logging.Formatter("[%(asctime)s] [%(levelname)s] %(name)s: %(message
 handler.setFormatter(formatter)
 logger.addHandler(handler)
 
-client = Client(host=CLICKHOUSE_HOST)
+client = Client(host=CLICKHOUSE_HOST, port=CLICKHOUSE_NATIVE_PORT)
 
 
 async def process_message(message: aio_pika.IncomingMessage):

@@ -26,18 +26,16 @@ async def cleanup_rabbit(app: web.Application) -> None:
     if rabbit:
         m = app["metrics"]
         logger.info(f"Sent messages: {m.sent_messages}")
-        logger.info(
-            f"Avg publish latency: {sum(m.publish_latencies) / len(m.publish_latencies):.4f}s"
-        )
+        if m.publish_latencies:
+            avg_latency = sum(m.publish_latencies) / len(m.publish_latencies)
+            logger.info(f"Avg publish latency: {avg_latency:.4f}s")
+        else:
+            logger.info("Avg publish latency: 0.0000s")
         await rabbit.close()
 
 
 async def graceful_shutdown(app: web.Application):
     print("[SHUTDOWN] Stopping background tasks and closing connections...")
-
-    # Останавливаем очередь событий
-    if "event_queue" in app:
-        await app["event_queue"].stop()
 
     # Закрываем соединение с RabbitMQ
     if "rabbit" in app:

@@ -5,14 +5,6 @@ from aiohttp import web
 
 
 @pytest.fixture
-def cli_queue() -> AsyncMock:
-    """Мок очереди событий с awaitable put"""
-    queue = AsyncMock()
-    queue.put = AsyncMock()
-    return queue
-
-
-@pytest.fixture
 def cli_ch_client() -> MagicMock:
     """Мок ClickHouse клиента"""
     client = MagicMock()
@@ -32,12 +24,9 @@ def cli_rabbit() -> AsyncMock:
 
 
 @pytest.fixture
-def app(
-    cli_queue: AsyncMock, cli_ch_client: MagicMock, cli_rabbit: AsyncMock
-) -> web.Application:
+def app(cli_ch_client: MagicMock, cli_rabbit: AsyncMock) -> web.Application:
     """Создание aiohttp приложения с моками"""
     application = web.Application()
-    application["event_queue"] = cli_queue
     application["clickhouse"] = cli_ch_client
     application["rabbit"] = cli_rabbit
     return application
