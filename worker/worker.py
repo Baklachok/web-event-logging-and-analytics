@@ -1,6 +1,5 @@
 import asyncio
 import os
-from datetime import datetime
 import json
 import logging
 
@@ -11,37 +10,37 @@ CLICKHOUSE_HOST = os.getenv("CLICKHOUSE_HOST", "localhost")
 CLICKHOUSE_NATIVE_PORT = int(os.getenv("CLICKHOUSE_NATIVE_PORT", "9000"))
 RABBIT_URL = os.getenv("RABBIT_URL", "amqp://guest:guest@rabbitmq:5672/")
 
-# Настройка логгера
+COMMANDS_EXCHANGE = "commands_exchange"
+COMMANDS_QUEUE = "commands"
+PURGE_ROUTING_KEY = "commands.purge"
+DLQ_EXCHANGE = "commands_dlx"
+DLQ_QUEUE = "commands.dlq"
+
 logger = logging.getLogger("worker")
 logger.setLevel(logging.INFO)
 handler = logging.StreamHandler()
-formatter = logging.Formatter("[%(asctime)s] [%(levelname)s] %(name)s: %(message)s")
-handler.setFormatter(formatter)
+handler.setFormatter(
+    logging.Formatter("[%(asctime)s] [%(levelname)s] %(name)s: %(message)s")
+)
 logger.addHandler(handler)
 
 client = Client(host=CLICKHOUSE_HOST, port=CLICKHOUSE_NATIVE_PORT)
 
 
-async def process_message(message: aio_pika.IncomingMessage):
-    try:
-        body = json.loads(message.body.decode())
+async def process_command(message: aio_pika.IncomingMessage) -> None:
+    """Обрабатывает purge-команду. Исключение → nack → DLQ."""
+    body = json.loads(message.body.decode())
+    user_id = body["user_id"]  # KeyError → nack → DLQ, что корректно для мусора
 
-        user_id = body["user_id"]
-        event_type = body["event_type"]
-        page = body["page"]
-        timestamp = datetime.fromisoformat(body["timestamp"])
-
-        client.execute(
-            """
-            INSERT INTO events (user_id, event_type, page, timestamp)
-            VALUES
-            """,
-            [(user_id, event_type, page, timestamp)],
-        )
-        logger.info("Inserted event into ClickHouse: %s", body)
-    except Exception as e:
-        logger.error("Failed to process message: %s; error: %s", message.body, e)
-        raise
+    logger.info("Purge-команда для user_id=%s", user_id)
+    client.execute(
+        "ALTER TABLE events DELETE WHERE user_id = %(uid)s",
+        {"uid": user_id},
+        settings={
+            "mutations_sync": 2
+        },  # ждём реального удаления, не постановки в очередь
+    )
+    logger.info("Данные user_id=%s удалены из ClickHouse", user_id)
 
 
 async def connect_with_retry(url, retries=10, base_delay=2):
@@ -54,8 +53,7 @@ async def connect_with_retry(url, retries=10, base_delay=2):
             return connection
         except Exception as e:
             attempt += 1
-            delay = base_delay * (2 ** (attempt - 1))
-            delay = min(delay, 30)  # ограничение максимального backoff
+            delay = min(base_delay * (2 ** (attempt - 1)), 30)
             logger.warning(
                 "RabbitMQ not ready (attempt %d/%d: %s), retrying in %ds...",
                 attempt,
@@ -72,20 +70,43 @@ async def connect_with_retry(url, retries=10, base_delay=2):
 async def main():
     connection = await connect_with_retry(RABBIT_URL)
     channel = await connection.channel()
+    await channel.set_qos(prefetch_count=10)
 
-    queue = await channel.declare_queue(
-        "events_queue",
-        durable=True,
+    # --- DLQ-инфраструктура: dead-letter exchange + очередь для «мёртвых» команд ---
+    dlx = await channel.declare_exchange(
+        DLQ_EXCHANGE, aio_pika.ExchangeType.FANOUT, durable=True
     )
-    logger.info("Subscribed to queue: %s", queue)
+    dlq = await channel.declare_queue(DLQ_QUEUE, durable=True)
+    await dlq.bind(dlx)
+
+    # --- основной topic-exchange для команд ---
+    commands_exchange = await channel.declare_exchange(
+        COMMANDS_EXCHANGE, aio_pika.ExchangeType.TOPIC, durable=True
+    )
+
+    # --- рабочая очередь с привязкой к DLX: nack(requeue=False) → сообщение уходит в DLQ ---
+    queue = await channel.declare_queue(
+        COMMANDS_QUEUE,
+        durable=True,
+        arguments={"x-dead-letter-exchange": DLQ_EXCHANGE},
+    )
+    await queue.bind(commands_exchange, routing_key=PURGE_ROUTING_KEY)
+    logger.info(
+        "Подписан на очередь '%s' (rk=%s), DLQ='%s'",
+        COMMANDS_QUEUE,
+        PURGE_ROUTING_KEY,
+        DLQ_QUEUE,
+    )
 
     async with queue.iterator() as queue_iter:
         async for message in queue_iter:
             try:
-                async with message.process(requeue=True):
-                    await process_message(message)
+                # requeue=False: при исключении сообщение НЕ возвращается в очередь,
+                # а по x-dead-letter-exchange уезжает в commands.dlq
+                async with message.process(requeue=False):
+                    await process_command(message)
             except Exception as e:
-                logger.error("Error processing message: %s", e)
+                logger.error("Команда ушла в DLQ: %s; error: %s", message.body, e)
 
 
 if __name__ == "__main__":

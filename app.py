@@ -2,6 +2,7 @@ from aiohttp import web
 
 from src.config import HOST, PORT
 from src.db.clickhouse import ch_client
+from src.kafka.settings import setup_kafka, cleanup_kafka
 from src.metrics.metrics import Metrics
 from src.rabbit.settings import setup_rabbit, cleanup_rabbit, graceful_shutdown
 from src.swagger.settings import setup_swagger
@@ -21,6 +22,13 @@ async def rabbit_ctx(app: web.Application):
     await cleanup_rabbit(app)
 
 
+async def kafka_ctx(app: web.Application):
+    """Жизненный цикл Kafka-продюсера: старт до yield, остановка после."""
+    await setup_kafka(app)
+    yield
+    await cleanup_kafka(app)
+
+
 # -----------------------------------------------------------
 # Основной конструктор приложения
 # -----------------------------------------------------------
@@ -37,6 +45,7 @@ def create_app() -> web.Application:
 
     # Контекстные менеджеры сервисов
     app.cleanup_ctx.append(rabbit_ctx)
+    app.cleanup_ctx.append(kafka_ctx)
 
     # Swagger и маршруты
     setup_swagger(app)

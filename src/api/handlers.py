@@ -1,13 +1,21 @@
+import json
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Mapping, TypeVar
 
+import aio_pika
 from aiohttp import web
+from pydantic import BaseModel, ValidationError
 
+from src.api.schemas import Event, PurgeUserCommand
 from src.db.types import ClickHouseClientProtocol
 from src.utils.clickhouse_utils import rows_to_dicts, build_filters
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
+
+PURGE_ROUTING_KEY = "commands.purge"
+
+ModelT = TypeVar("ModelT", bound=BaseModel)
 
 
 @dataclass(frozen=True)
@@ -15,6 +23,22 @@ class StatsQueryParams:
     event_type: str | None
     date_from: str | None
     date_to: str | None
+
+
+def _json_error(exc_class: type[web.HTTPException], detail: object) -> web.HTTPException:
+    """Строит HTTP-ошибку с телом {"detail": ...} в JSON."""
+    return exc_class(
+        text=json.dumps({"detail": detail}, default=str),
+        content_type="application/json",
+    )
+
+
+def _validate(model: type[ModelT], data: object) -> ModelT:
+    """Валидирует payload pydantic-моделью; невалидный → 422 (в топик не попадёт)."""
+    try:
+        return model.model_validate(data)
+    except ValidationError as exc:
+        raise _json_error(web.HTTPUnprocessableEntity, exc.errors())
 
 
 def _get_clickhouse(app: web.Application) -> ClickHouseClientProtocol:
@@ -42,38 +66,13 @@ def _build_stats_query(
 
 
 async def add_event(request: web.Request) -> web.Response:
-    """
-    Добавляет событие
-    ---
-    requestBody:
-      required: true
-      content:
-        application/json:
-          schema:
-            type: object
-            properties:
-              user_id:
-                type: integer
-              event_type:
-                type: string
-              page:
-                type: string
-              timestamp:
-                type: string
-                format: date-time
-    responses:
-      '201':
-        description: Событие добавлено
-    """
-    data: dict[str, Any] = await request.json()
+    data = await request.json()
     logger.info("Получено новое событие: %s", data)
 
-    rabbit = request.app["rabbit"]
+    event = _validate(Event, data)
 
-    logger.info("Публикация события в RabbitMQ...")
-    await rabbit.publish(data)
-    logger.info("Событие успешно опубликовано")
-
+    await request.app["kafka"].publish(event.model_dump(mode="json"))
+    logger.info("Событие опубликовано в Kafka")
     return web.json_response({"status": "queued"}, status=201)
 
 
@@ -168,3 +167,36 @@ async def get_stats(request: web.Request) -> web.Response:
     logger.info("Получена статистика по событиям: %s", stats)
 
     return web.json_response(stats)
+
+
+async def purge_user(request: web.Request) -> web.Response:
+    """
+    Команда на удаление данных пользователя
+    ---
+    requestBody:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              user_id:
+                type: integer
+    responses:
+      '202':
+        description: Команда принята к исполнению
+    """
+    data = await request.json()
+    logger.info("Получена команда purge-user: %s", data)
+
+    command = _validate(PurgeUserCommand, data)
+
+    try:
+        await request.app["rabbit"].publish(
+            command.model_dump(), routing_key=PURGE_ROUTING_KEY, mandatory=True
+        )
+    except aio_pika.exceptions.DeliveryError:  # unroutable: очереди/consumer'а нет
+        raise _json_error(web.HTTPServiceUnavailable, "command consumer unavailable")
+
+    logger.info("Команда опубликована в RabbitMQ (rk=%s)", PURGE_ROUTING_KEY)
+    return web.json_response({"status": "accepted"}, status=202)

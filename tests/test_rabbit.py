@@ -22,23 +22,25 @@ async def test_connect_and_setup():
     metrics = DummyMetrics()
     rabbit = RabbitMQ(url="amqp://guest:guest@localhost/", metrics=metrics)
 
-    # Мокаем connect_robust и channel
     with patch("aio_pika.connect_robust", new_callable=AsyncMock) as mock_connect:
         mock_channel = AsyncMock()
         mock_connect.return_value.channel = AsyncMock(return_value=mock_channel)
         mock_channel.set_qos = AsyncMock()
         mock_channel.declare_exchange = AsyncMock()
-        mock_channel.declare_queue = AsyncMock()
-        mock_queue = AsyncMock()
-        mock_channel.declare_queue.return_value = mock_queue
-        mock_queue.bind = AsyncMock()
+        mock_channel.declare_queue = (
+            AsyncMock()
+        )  # оставляем мок, чтобы поймать лишний вызов
 
         await rabbit.connect()
 
         assert rabbit.connection is not None
         assert rabbit.channel is not None
         assert rabbit.exchange is not None
-        assert rabbit.queue is not None
+
+        # НОВЫЙ контракт: продюсер объявляет только exchange, очередь принадлежит worker'у
+        assert rabbit.queue is None  # ← перевёрнутый инвариант
+        mock_channel.declare_exchange.assert_awaited_once()  # exchange — да
+        mock_channel.declare_queue.assert_not_awaited()  # queue — нет (защита от гонки 406)
 
 
 @pytest.mark.asyncio

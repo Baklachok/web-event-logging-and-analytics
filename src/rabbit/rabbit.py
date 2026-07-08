@@ -85,23 +85,27 @@ class RabbitMQ:
     # PRIVATE: SETUP EXCHANGE AND QUEUE
     # -----------------------------------------------------
     async def _setup_exchange_queue(self) -> None:
-        """Создаёт exchange, очередь и биндинг."""
+        """Продюсер объявляет ТОЛЬКО exchange. Очередь и DLQ — зона ответственности consumer'а (worker)."""
         if self.channel is None:
             raise RuntimeError("Channel is not initialized")
         self.exchange = await self.channel.declare_exchange(
             self.exchange_name, ExchangeType.TOPIC, durable=True
         )
-        self.queue = await self.channel.declare_queue(self.queue_name, durable=True)
-        await self.queue.bind(self.exchange, routing_key=self.routing_key)
+        # queue.declare / bind УБРАНЫ — их делает worker, единственный владелец очереди
         logger.info(
-            f"Setup complete → exchange='{self.exchange_name}', queue='{self.queue_name}', routing_key='{self.routing_key}'"
+            f"Producer setup → exchange='{self.exchange_name}' (queue owned by consumer)"
         )
 
     # -----------------------------------------------------
     # PUBLISH
     # -----------------------------------------------------
-    async def publish(self, message: dict) -> None:
-        """Публикует JSON-сообщение в очередь и обновляет метрики."""
+    async def publish(
+        self,
+        message: dict,
+        routing_key: str | None = None,
+        mandatory: bool = False,
+    ) -> None:
+        """Публикует JSON-сообщение. routing_key переопределяет дефолтный ключ."""
         if not self.exchange:
             raise RuntimeError("RabbitMQ is not connected. Call connect() first.")
 
@@ -110,14 +114,14 @@ class RabbitMQ:
             body=json.dumps(message).encode("utf-8"),
             delivery_mode=DeliveryMode.PERSISTENT,
         )
-        await self.exchange.publish(msg, routing_key=self.routing_key)
+        rk = routing_key if routing_key is not None else self.routing_key
+        await self.exchange.publish(msg, routing_key=rk, mandatory=mandatory)
 
         latency = time.monotonic() - start
         self.metrics.inc_sent()
         self.metrics.add_latency(latency)
-
         logger.debug(
-            f"Published message to '{self.routing_key}' (latency={latency:.5f}s)"
+            f"Published message to '{rk}' (latency={latency:.5f}s, mandatory={mandatory})"
         )
 
     # -----------------------------------------------------

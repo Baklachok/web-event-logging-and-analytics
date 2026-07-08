@@ -3,6 +3,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from aiohttp import web
 
+from src.rabbit.rabbit import RabbitMQ
+
 
 @pytest.fixture
 def cli_ch_client() -> MagicMock:
@@ -17,18 +19,26 @@ def cli_ch_client() -> MagicMock:
 
 @pytest.fixture
 def cli_rabbit() -> AsyncMock:
-    """Мок RabbitMQ с publish"""
-    rabbit = AsyncMock()
-    rabbit.publish = AsyncMock()
+    rabbit = AsyncMock(spec=RabbitMQ)  # мок знает реальную сигнатуру publish
     return rabbit
 
 
 @pytest.fixture
-def app(cli_ch_client: MagicMock, cli_rabbit: AsyncMock) -> web.Application:
-    """Создание aiohttp приложения с моками"""
+def cli_kafka() -> AsyncMock:
+    """Мок Kafka-обёртки с publish"""
+    kafka = AsyncMock()
+    kafka.publish = AsyncMock()
+    return kafka
+
+
+@pytest.fixture
+def app(
+    cli_ch_client: MagicMock, cli_rabbit: AsyncMock, cli_kafka: AsyncMock
+) -> web.Application:
     application = web.Application()
     application["clickhouse"] = cli_ch_client
     application["rabbit"] = cli_rabbit
+    application["kafka"] = cli_kafka  # ← события уезжают сюда
     return application
 
 

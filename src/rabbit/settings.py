@@ -12,9 +12,9 @@ async def setup_rabbit(app: web.Application) -> None:
     rabbit = RabbitMQ(
         url=RABBIT_URL,
         metrics=app["metrics"],
-        exchange_name="events_exchange",
-        queue_name="events_queue",
-        routing_key="events.key",
+        exchange_name="commands_exchange",  # та же биржа, что биндит worker
+        routing_key="commands.purge",  # дефолтный ключ — командный
+        # queue_name больше не используется продюсером — можно не задавать
     )
     await rabbit.connect()
     app["rabbit"] = rabbit
